@@ -1,0 +1,115 @@
+diff -ru linux-3.5.4/arch/x86/syscalls/syscall_64.tbl linux-3.5.4-compile/arch/x86/syscalls/syscall_64.tbl
+--- linux-3.5.4/arch/x86/syscalls/syscall_64.tbl	2012-09-15 00:28:08.000000000 +0200
++++ linux-3.5.4-compile/arch/x86/syscalls/syscall_64.tbl	2012-09-28 04:45:49.232275782 +0200
+@@ -319,6 +319,7 @@
+ 310	64	process_vm_readv	sys_process_vm_readv
+ 311	64	process_vm_writev	sys_process_vm_writev
+ 312	common	kcmp			sys_kcmp
++313	common	ptree			sys_ptree
+ 
+ #
+ # x32-specific system call numbers start at 512 to avoid cache impact
+diff -ru linux-3.5.4/include/linux/sched.h linux-3.5.4-compile/include/linux/sched.h
+--- linux-3.5.4/include/linux/sched.h	2012-09-15 00:28:08.000000000 +0200
++++ linux-3.5.4-compile/include/linux/sched.h	2012-09-28 04:45:49.273275264 +0200
+@@ -465,6 +465,16 @@
+ 	u32 incr_error;
+ };
+ 
++struct prinfo {
++	long state;
++	pid_t pid;
++	pid_t parent_pid;
++	pid_t first_child_pid;
++	pid_t next_sibling_pid;
++	long uid;
++	char comm[64];
++};
++
+ /**
+  * struct task_cputime - collected CPU time counts
+  * @utime:		time spent in user mode, in &cputime_t units
+diff -ru linux-3.5.4/kernel/sched/core.c linux-3.5.4-compile/kernel/sched/core.c
+--- linux-3.5.4/kernel/sched/core.c	2012-09-15 00:28:08.000000000 +0200
++++ linux-3.5.4-compile/kernel/sched/core.c	2012-09-30 11:01:31.395166872 +0200
+@@ -4453,6 +4453,80 @@
+ 	return retval;
+ }
+ 
++/*
++ * Does a depth first search through the entire process tree.
++ * nr is a pointer to the number of entries that should be put
++ * into the address specified by buf. nr is set to the number
++ * of entries actually put into that buffer.
++ */
++SYSCALL_DEFINE2(ptree, struct prinfo *, buf, unsigned int *, nr)
++{
++	unsigned int count, max;
++	int ret, moved_up;
++	struct prinfo info;
++	struct task_struct *task, *child, *sibling;
++	
++	ret = 0;
++	count = 0;
++
++	if (!nr)
++		return -EINVAL;
++	if (get_user(max, nr)) {
++		ret = -EFAULT;
++		goto out;
++	}
++	if (!buf) {
++		ret = -EINVAL;
++		goto out;
++	}
++
++	memset(&info, 0, sizeof(info));
++	task = &init_task;
++	moved_up = 0;
++	rcu_read_lock();
++	while (task && count < max) {
++		child = list_empty(&task->children) ? NULL : list_first_entry(&task->children, struct task_struct, sibling);
++		sibling = list_empty(&task->sibling) ? NULL : list_first_entry(&task->sibling, struct task_struct, sibling);
++
++		/* If we're not traversing back up the list, and we're not init_task,
++		 * then this is a task we want. */
++		if (!moved_up && task->pid) {
++			info.state = task->state;
++			info.pid = task->pid;
++			info.parent_pid = task->parent->pid;
++			info.first_child_pid = child ? child->pid : 0;
++			info.next_sibling_pid = sibling ? sibling->pid : 0;
++			info.uid = task->cred->uid;
++			get_task_comm(info.comm, task);
++			if (copy_to_user(&(buf[count++]), &info, sizeof(struct prinfo))) {
++				ret = -EFAULT;
++				break;
++			}
++		}
++		/* If we have just moved back up the list, or if we're at a leaf node... */
++		if (moved_up || !child) {
++			if (!task->parent)
++				break;
++
++			/* If there are no other siblings to hang out with, move up another
++			 * level to the parent. */
++			if (list_is_last(&task->sibling, &task->parent->children)) {
++				task = task->parent;
++				moved_up = 1;
++			} else { /* Otherwise, check out the sibling. */
++				task = sibling;
++				moved_up = 0;
++			}
++		} else /* Otherwise, next time examine the next child. */
++			task = child;
++	}
++	rcu_read_unlock();
++out:
++	/* nr should be the number of entries copied */
++	*nr = count;
++	return ret;
++}
++
+ /**
+  * sys_sched_setscheduler - set/change the scheduler policy and RT priority
+  * @pid: the pid in question.

@@ -1,0 +1,29 @@
+#!/bin/sh
+
+mkdir -p /dev /proc /sys /etc
+[ ! -e /dev/console ]	&& mknod /dev/console c 5 1
+[ ! -e /dev/null ]	&& mknod /dev/null c 1 3
+[ ! -e /dev/tty ]	&& mknod /dev/tty c 5 0
+[ ! -e /dev/urandom ]	&& mknod /dev/urandom c 1 9
+[ ! -e /dev/random ]	&& mknod /dev/random c 1 8
+[ ! -e /dev/zero ]	&& mknod /dev/zero c 1 5
+
+mount -t sysfs sysfs /sys
+mount -t proc proc /proc
+mount -t devtmpfs devtmpfs /dev
+echo 0 > /proc/sys/kernel/printk
+/bin/busybox --install -s
+ifconfig eth0 up
+udhcpc -b -i eth0 -s /sbin/dhcpassign.sh
+rm /init
+clear
+
+export HOME=/home
+export ENV=$HOME/.profile
+chown -R 1000:1000 $HOME
+cd $HOME
+while true; do
+	cat README
+	setsid sh -c 'exec sh --login -c "exec chpst -u 1000:1000 /bin/sh" </dev/tty1 >/dev/tty1 2>&1'
+	clear
+done

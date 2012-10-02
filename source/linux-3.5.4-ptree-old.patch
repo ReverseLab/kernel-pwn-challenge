@@ -1,0 +1,143 @@
+diff -ru linux-3.5.4/arch/x86/syscalls/syscall_64.tbl /usr/src/linux/arch/x86/syscalls/syscall_64.tbl
+--- linux-3.5.4/arch/x86/syscalls/syscall_64.tbl	2012-09-15 00:28:08.000000000 +0200
++++ /usr/src/linux/arch/x86/syscalls/syscall_64.tbl	2012-09-26 23:00:51.995598923 +0200
+@@ -319,6 +319,7 @@
+ 310	64	process_vm_readv	sys_process_vm_readv
+ 311	64	process_vm_writev	sys_process_vm_writev
+ 312	common	kcmp			sys_kcmp
++313	common	ptree			sys_ptree
+ 
+ #
+ # x32-specific system call numbers start at 512 to avoid cache impact
+diff -ru linux-3.5.4/include/linux/sched.h /usr/src/linux/include/linux/sched.h
+--- linux-3.5.4/include/linux/sched.h	2012-09-15 00:28:08.000000000 +0200
++++ /usr/src/linux/include/linux/sched.h	2012-09-28 00:19:12.233194589 +0200
+@@ -465,6 +465,16 @@
+ 	u32 incr_error;
+ };
+ 
++struct prinfo {
++	long state;
++	pid_t pid;
++	pid_t parent_pid;
++	pid_t first_child_pid;
++	pid_t next_sibling_pid;
++	long uid;
++	char comm[64];
++};
++
+ /**
+  * struct task_cputime - collected CPU time counts
+  * @utime:		time spent in user mode, in &cputime_t units
+diff -ru linux-3.5.4/kernel/sched/core.c /usr/src/linux/kernel/sched/core.c
+--- linux-3.5.4/kernel/sched/core.c	2012-09-15 00:28:08.000000000 +0200
++++ /usr/src/linux/kernel/sched/core.c	2012-09-28 01:13:27.958635306 +0200
+@@ -4453,6 +4453,108 @@
+ 	return retval;
+ }
+ 
++/*
++ * Does a depth first search through the entire process tree.
++ * nr is a pointer to the number of entries that should be put
++ * into the address specified by buf. nr is set to the number
++ * of entries actually put into that buffer.
++ *
++ * We make careful use of a linked list functioning as a stack
++ * to walk the tree. We can't use recursion in the kernel
++ * because of the limited call stack depth:
++ * http://jon.oberheide.org/blog/2010/11/29/exploiting-stack-overflows-in-the-linux-kernel/
++ */
++SYSCALL_DEFINE2(ptree, struct prinfo *, buf, unsigned int *, nr)
++{
++	unsigned int count, max;
++	int ret;
++	struct prinfo info;
++	struct task_struct *task, *child;
++	struct task_node {
++		struct task_struct *task;
++		struct list_head list;
++	};
++	struct task_node *node;
++	LIST_HEAD(task_stack);
++
++	ret = 0;
++	count = 0;
++
++	if (!nr)
++		return -EINVAL;
++	if (!buf) {
++		ret = -EINVAL;
++		goto out;
++	}
++	if (get_user(max, nr)) {
++		ret = -EFAULT;
++		goto out;
++	}
++
++	memset(&info, 0, sizeof(info));
++
++	/* Allocate the first node, and make it the init_task. */
++	node = kmalloc(sizeof(struct task_node), GFP_KERNEL);
++	if (!node) {
++		ret = -ENOMEM;
++		goto out;
++	}
++	INIT_LIST_HEAD(&node->list);
++	node->task = &init_task;
++	list_add(&node->list, &task_stack);
++
++	rcu_read_lock();
++	while (!list_empty(&task_stack)) {
++		/* Pop the first node off the stack. */
++		node = list_first_entry(&task_stack, struct task_node, list);
++		task = node->task;
++		list_del(&node->list);
++		kfree(node);
++
++		/* If there's been an error or if there's no more space on
++		 * the user side of things, just iterate to pop and free
++		 * everything off the stack, but don't actually continue
++		 * to copy things into the user's array, which is full. */
++		if (count >= max && !ret)
++			continue;
++
++		/* If the task has a pid (it isn't init_task), copy it
++		 * into the user's struct array. */
++		if (task->pid) {
++			info.state = task->state;
++			info.pid = task->pid;
++			info.parent_pid = task->parent->pid;
++			child = list_first_entry(&task->children, struct task_struct, sibling);
++			info.first_child_pid = child ? child->pid : 0;
++			child = list_first_entry(&task->sibling, struct task_struct, sibling);
++			info.next_sibling_pid = child ? child->pid : 0;
++			info.uid = task->cred->uid;
++			get_task_comm(info.comm, task);
++			if (copy_to_user(&(buf[count++]), &info, sizeof(struct prinfo))) {
++				ret = -EFAULT;
++				continue;
++			}
++		}
++
++		/* Add children to stack, allocating nodes as above for the init_task. */
++		list_for_each_entry_reverse(child, &task->children, sibling) {
++			node = kmalloc(sizeof(struct task_node), GFP_KERNEL);
++			if (!node) {
++				ret = -ENOMEM;
++				break;
++			}
++			INIT_LIST_HEAD(&node->list);
++			node->task = child;
++			list_add(&node->list, &task_stack);
++		}
++	}
++	rcu_read_unlock();
++out:
++	/* nr should be the number of entries copied */
++	*nr = count;
++	return ret;
++}
++
+ /**
+  * sys_sched_setscheduler - set/change the scheduler policy and RT priority
+  * @pid: the pid in question.

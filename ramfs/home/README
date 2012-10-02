@@ -1,0 +1,21 @@
+=== Welcome to the ZX2C4 Kernel Challenge ===
+   by Jason A. Donenfeld <Jason@zx2c4.com>
+
+
+Pwn the kernel and pop a root shell!
+
+Source is available inside /src.
+
+
+eth0 receives an IP address via dhcp. It may be helpful to do
+development on the host and send binaries to the VM:
+
+On the VM:
+    /home $ while true; do nc -l -p 1234 > a; chmod +x a; ./a; done
+
+On the host:
+    $ gcc -static -o a vuln.c && nc 192.168.56.102 1234 < a
+
+
+More information about this project is available at:
+    <http://git.zx2c4.com/kernel-pwn-challenge/about/>
